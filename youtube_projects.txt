@@ -1,0 +1,517 @@
+import streamlit as st
+import pandas as pd
+from googleapiclient.discovery import build
+import pymysql
+from datetime import datetime
+
+# Replace with your YouTube Data API key
+api_key = "AIzaSyDlQk3ABh2Kn6ZVKpW5Sv6qGho3LfTpCLQ"
+
+# Function to convert ISO 8601 datetime string to MySQL datetime format
+def convert_to_mysql_datetime(dt_str):
+    try:
+        dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+        return dt.strftime('%Y-%m-%d %H:%M:%S')
+    except ValueError as e:
+        st.error(f"Error converting datetime: {e}")
+        return None
+
+# Function to establish MySQL database connection
+def get_db_connection():
+    try:
+        return pymysql.connect(
+            host="localhost",
+            user="root",
+            password="Mysql123!",
+            database="youtube_project"
+        )
+    except pymysql.MySQLError as e:
+        st.error(f"Error connecting to database: {e}")
+        return None
+
+# Function to create tables in MySQL database
+def create_tables():
+    conn = get_db_connection()
+    if not conn:
+        st.error("Failed to connect to the database.")
+        return False
+    
+    cursor = conn.cursor()
+    
+    try:
+        # Create 'channell' table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS channell (
+                channel_id VARCHAR(50) PRIMARY KEY,
+                channel_name VARCHAR(255),
+                description TEXT,
+                published_date DATETIME,
+                subscriber_count BIGINT,
+                view_count BIGINT,
+                video_count BIGINT
+            )
+        """)
+        
+        # Create 'videoss' table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS videoss (
+                video_id VARCHAR(50) PRIMARY KEY,
+                channel_name VARCHAR(255),
+                title VARCHAR(255),
+                tags TEXT,
+                description TEXT,
+                published_at DATETIME,
+                view_count BIGINT,
+                like_count BIGINT,
+                dislike_count BIGINT,
+                comment_count BIGINT
+            )
+        """)
+        
+        # Create 'commentss' table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS commentss (
+                comment_id VARCHAR(50) PRIMARY KEY,
+                video_id VARCHAR(50),
+                author_name VARCHAR(255),
+                published_at DATETIME,
+                top_level_comment TEXT,
+                FOREIGN KEY (video_id) REFERENCES videoss(video_id)
+            )
+        """)
+        
+        conn.commit()
+        return True
+        
+    except pymysql.MySQLError as e:
+        st.error(f"Error creating tables: {e}")
+        return False
+        
+    finally:
+        conn.close()
+
+# Function to fetch channel data from YouTube API
+def get_channel_data(channel_id):
+    try:
+        youtube = build('youtube', 'v3', developerKey=api_key)
+        request = youtube.channels().list(
+            part="snippet,contentDetails,statistics",
+            id=channel_id
+        )
+        response = request.execute()
+        channel_data = response['items'][0] if response['items'] else None
+        if channel_data:
+            # Fetch channel logo URL
+            channel_logo_url = channel_data['snippet']['thumbnails']['default']['url']
+            channel_data['Channel_Logo_URL'] = channel_logo_url  # Add 'Channel_Logo_URL' key to channel_data
+        return channel_data
+    except Exception as e:
+        st.error(f"Error fetching channel data: {e}")
+        return None
+
+# Function to fetch comment details from YouTube API
+def get_comment_detail(video_ids):
+    comment_details = []
+    youtube = build('youtube', 'v3', developerKey=api_key)
+    try:
+        for video_id in video_ids:
+            try:
+                request = youtube.commentThreads().list(
+                    part="snippet",
+                    videoId=video_id,
+                    maxResults=50
+                )
+                response = request.execute()
+                for i in response.get('items', []):
+                    snippet = i.get('snippet', {})
+                    top_level_comment = snippet.get('topLevelComment', {})
+                    comment_snippet = top_level_comment.get('snippet', {})
+                    comment_data = {
+                        'Comment_Id': top_level_comment.get('id', 'N/A'),
+                        'Video_Id': comment_snippet.get('videoId', 'N/A'),
+                        'Author_Name': comment_snippet.get('authorDisplayName', 'N/A'),
+                        'PublishedAt': comment_snippet.get('publishedAt', 'N/A'),
+                        'Top_Level_Comment': comment_snippet.get('textDisplay', 'N/A')
+                    }
+                    comment_details.append(comment_data)
+            except Exception as e:
+                if "commentsDisabled" in str(e):
+                    st.warning(f"Comments are disabled for video ID: {video_id}")
+                else:
+                    st.error(f"Error fetching comments for video ID {video_id}: {e}")
+    except Exception as e:
+        st.error(f"Error fetching comments data: {e}")
+    return comment_details
+
+# Function to fetch video details from YouTube API
+def get_videos_info(channel_id):
+    videos_info = []
+    youtube = build('youtube', 'v3', developerKey=api_key)
+    try:
+        request = youtube.search().list(
+            part="snippet",
+            channelId=channel_id,
+            type="video",
+            maxResults=10  # Adjust as needed
+        )
+        response = request.execute()
+        for item in response['items']:
+            video_id = item['id']['videoId']
+            video_info = get_video_details(video_id)
+            if video_info:
+                videos_info.append(video_info)
+    except Exception as e:
+        st.error(f"Error fetching videos for channel ID {channel_id}: {e}")
+    return videos_info
+
+# Function to fetch detailed video information
+def get_video_details(video_id):
+    youtube = build('youtube', 'v3', developerKey=api_key)
+    try:
+        request = youtube.videos().list(
+            part="snippet,statistics",
+            id=video_id
+        )
+        response = request.execute()
+        if response['items']:
+            video = response['items'][0]
+            video_info = {
+                'Video_Id': video['id'],
+                'Channel_Name': video['snippet']['channelTitle'],
+                'Title': video['snippet']['title'],
+                'Tags': video['snippet'].get('tags', []),
+                'Description': video['snippet'].get('description', ''),
+                'Published_At': video['snippet']['publishedAt'],
+                'View_Count': int(video['statistics'].get('viewCount', 0)),
+                'Like_Count': int(video['statistics'].get('likeCount', 0)),
+                'Dislike_Count': int(video['statistics'].get('dislikeCount', 0)),
+                'Comment_Count': int(video['statistics'].get('commentCount', 0))
+            }
+            return video_info
+    except Exception as e:
+        st.error(f"Error fetching video details for video ID {video_id}: {e}")
+    return None
+
+# Function to save comment data to the database
+def save_comment_to_db(comment_data):
+    conn = get_db_connection()
+    if not conn:
+        st.error("Failed to connect to the database.")
+        return
+    
+    cursor = conn.cursor()
+    
+    try:
+        sql = """
+            INSERT INTO commentss (comment_id, video_id, author_name, published_at, top_level_comment)
+            VALUES (%s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                video_id = VALUES(video_id),
+                author_name = VALUES(author_name),
+                published_at = VALUES(published_at),
+                top_level_comment = VALUES(top_level_comment)
+        """
+        values = (
+            comment_data['Comment_Id'],
+            comment_data['Video_Id'],
+            comment_data['Author_Name'],
+            convert_to_mysql_datetime(comment_data['PublishedAt']),
+            comment_data['Top_Level_Comment']
+        )
+        cursor.execute(sql, values)
+        conn.commit()
+        st.success("Comment data saved to the database.")
+    except pymysql.MySQLError as e:
+        conn.rollback()
+        st.error(f"MySQL error occurred: {e}")
+    finally:
+        conn.close()
+
+# Function to execute SQL queries based on user-selected option
+def execute_query(query_option):
+    conn = get_db_connection()
+    if not conn:
+        st.error("Failed to connect to the database.")
+        return None
+
+    cursor = conn.cursor()
+    results = None
+
+    try:
+        if query_option == "Names of all videos and their corresponding channels":
+            cursor.execute("""
+                SELECT v.title, c.channel_name
+                FROM videoss v
+                INNER JOIN channell c ON v.channel_name = c.channel_name
+            """)
+            results = cursor.fetchall()
+            columns = ["Video Title", "Channel Name"]
+        
+        elif query_option == "Channels with the most number of videos":
+            cursor.execute("""
+                SELECT channel_name, COUNT(video_id) AS num_videos
+                FROM videoss
+                GROUP BY channel_name
+                ORDER BY num_videos DESC
+                LIMIT 5
+            """)
+            results = cursor.fetchall()
+            columns = ["Channel Name", "Number of Videos"]
+        
+        elif query_option == "Top 10 most viewed videos and their channels":
+            cursor.execute("""
+                SELECT title, channel_name, view_count
+                FROM videoss
+                ORDER BY view_count DESC
+                LIMIT 10
+            """)
+            results = cursor.fetchall()
+            columns = ["Video Title", "Channel Name", "View Count"]
+        
+        elif query_option == "Number of comments on each video":
+            cursor.execute("""
+                SELECT title, comment_count
+                FROM videoss
+                ORDER BY comment_count DESC
+            """)
+            results = cursor.fetchall()
+            columns = ["Video Title", "Comment Count"]
+        
+        elif query_option == "Videos with the highest number of likes":
+            cursor.execute("""
+                SELECT title, channel_name, like_count
+                FROM videoss
+                ORDER BY like_count DESC
+                LIMIT 10
+            """)
+            results = cursor.fetchall()
+            columns = ["Video Title", "Channel Name", "Like Count"]
+        
+        elif query_option == "Total number of likes and dislikes for each video":
+            cursor.execute("""
+                SELECT video_id, SUM(like_count) AS total_likes, SUM(dislike_count) AS total_dislikes
+                FROM videoss
+                GROUP BY video_id
+            """)
+            results = cursor.fetchall()
+            columns = ["Video ID", "Total Likes", "Total Dislikes"]
+        
+        elif query_option == "Total number of views for each channel":
+            cursor.execute("""
+                SELECT channel_name, SUM(view_count) AS total_views
+                FROM videoss
+                GROUP BY channel_name
+            """)
+            results = cursor.fetchall()
+            columns = ["Channel Name", "Total Views"]
+        
+        elif query_option == "Channels that have published videos in 2022":
+            cursor.execute("""
+                SELECT DISTINCT channel_name
+                FROM videoss
+                WHERE YEAR(published_at) = 2022
+            """)
+            results = cursor.fetchall()
+            columns = ["Channel Name"]
+        
+        else:
+            st.warning("Query option not recognized.")
+            return None
+        
+    except pymysql.MySQLError as e:
+        st.error(f"MySQL error occurred: {e}")
+        return None
+    
+    finally:
+        conn.close()
+    
+    return results, columns
+
+# Main function to run the Streamlit app
+def main():
+    st.title("YouTube Data Harvesting and Warehousing")
+
+    # Initialize session state variables
+    if 'channel_data' not in st.session_state:
+        st.session_state.channel_data = None
+    if 'comments_info' not in st.session_state:
+        st.session_state.comments_info = None
+    if 'videos_info' not in st.session_state:
+        st.session_state.videos_info = None
+    if 'channel_id' not in st.session_state:
+        st.session_state.channel_id = None
+
+    # Sidebar navigation and user inputs
+    st.sidebar.subheader("Select an operation:")
+    operation = st.sidebar.selectbox("Operation", [
+        "Fetch Channel Data",
+        "Fetch Videos",
+        "Fetch Comments",
+        "Execute SQL Query"
+    ])
+
+    # Conditional rendering of Channel ID input
+    if operation != "Execute SQL Query":
+        st.sidebar.subheader("Enter Channel ID:")
+        channel_id = st.sidebar.text_input("Channel ID", key="channel_id_input")
+    else:
+        channel_id = None
+
+    # Handle operation based on user selection
+    if operation == "Fetch Channel Data":
+        # Fetch channel data from YouTube API
+        if st.sidebar.button("Fetch Channel Data"):
+            channel_data = get_channel_data(channel_id)
+            if channel_data:
+                st.session_state.channel_data = channel_data
+                # Display channel information
+                st.write(f"Channel ID: {channel_data['id']}")
+                st.image(channel_data['Channel_Logo_URL'], caption='Channel Logo', width=100)  # Adjust width as needed
+                st.write(f"Channel Name: {channel_data['snippet']['title']}")
+                st.write(f"Description: {channel_data['snippet']['description']}")
+                st.write(f"Published Date: {channel_data['snippet']['publishedAt']}")
+                st.write(f"Subscriber Count: {channel_data['statistics']['subscriberCount']}")
+                st.write(f"View Count: {channel_data['statistics']['viewCount']}")
+                st.write(f"Video Count: {channel_data['statistics']['videoCount']}")
+
+    elif operation == "Fetch Videos":
+        # Fetch videos for the given channel
+        if st.sidebar.button("Fetch Videos"):
+            videos_info = get_videos_info(channel_id)
+            if videos_info:
+                st.session_state.videos_info = videos_info
+                st.write("Fetched Videos Information:")
+                st.write(pd.DataFrame(videos_info))
+
+    elif operation == "Fetch Comments":
+        # Fetch comments for videos in the given channel
+        if st.sidebar.button("Fetch Comments"):
+            if st.session_state.videos_info:
+                video_ids = [video['Video_Id'] for video in st.session_state.videos_info]
+                comments_info = get_comment_detail(video_ids)
+                if comments_info:
+                    st.session_state.comments_info = comments_info
+                    st.write("Fetched Comments Information:")
+                    st.write(pd.DataFrame(comments_info))
+            else:
+                st.warning("Please fetch videos first to get their comments.")
+
+    elif operation == "Execute SQL Query":
+        # SQL Query execution based on user selection
+        st.sidebar.subheader("Select SQL Query:")
+        query_option = st.sidebar.selectbox("Query Option", [
+            "Names of all videos and their corresponding channels",
+            "Channels with the most number of videos",
+            "Top 10 most viewed videos and their channels",
+            "Number of comments on each video",
+            "Videos with the highest number of likes",
+            "Total number of likes and dislikes for each video",
+            "Total number of views for each channel",
+            "Channels that have published videos in 2022"
+        ])
+
+        if st.sidebar.button("Execute SQL Query"):
+            query_results, columns = execute_query(query_option)
+            if query_results:
+                st.write("Query Results:")
+                st.write(pd.DataFrame(query_results, columns=columns))
+            else:
+                st.warning("No results found or query execution failed.")
+    
+    # Conditional rendering of Save to Database button
+    if operation in ["Fetch Channel Data", "Fetch Videos", "Fetch Comments"] and operation != "Execute SQL Query":
+        if st.sidebar.button("Save to Database"):
+            # Save fetched data to MySQL database
+            conn = get_db_connection()
+            if not conn:
+                st.error("Failed to connect to the database.")
+                return
+            
+            cursor = conn.cursor()
+
+            if operation == "Fetch Channel Data" and st.session_state.channel_data:
+                # Save channel data to 'channell' table
+                channel_data = st.session_state.channel_data
+                sql = """
+                    INSERT INTO channell (channel_id, channel_name, description, published_date, subscriber_count, view_count, video_count)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        channel_name = VALUES(channel_name),
+                        description = VALUES(description),
+                        published_date = VALUES(published_date),
+                        subscriber_count = VALUES(subscriber_count),
+                        view_count = VALUES(view_count),
+                        video_count = VALUES(video_count)
+                """
+                values = (
+                    channel_data['id'],
+                    channel_data['snippet']['title'],
+                    channel_data['snippet']['description'],
+                    convert_to_mysql_datetime(channel_data['snippet']['publishedAt']),
+                    channel_data['statistics']['subscriberCount'],
+                    channel_data['statistics']['viewCount'],
+                    channel_data['statistics']['videoCount']
+                )
+                try:
+                    cursor.execute(sql, values)
+                    conn.commit()
+                    st.success("Channel data saved to the database.")
+                except pymysql.MySQLError as e:
+                    conn.rollback()
+                    st.error(f"MySQL error occurred: {e}")
+
+            elif operation == "Fetch Videos" and st.session_state.videos_info:
+                # Save videos data to 'videoss' table
+                videos_info = st.session_state.videos_info
+                sql = """
+                    INSERT INTO videoss (video_id, channel_name, title, tags, description, published_at, view_count, like_count, dislike_count, comment_count)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        channel_name = VALUES(channel_name),
+                        title = VALUES(title),
+                        tags = VALUES(tags),
+                        description = VALUES(description),
+                        published_at = VALUES(published_at),
+                        view_count = VALUES(view_count),
+                        like_count = VALUES(like_count),
+                        dislike_count = VALUES(dislike_count),
+                        comment_count = VALUES(comment_count)
+                """
+                try:
+                    for video in videos_info:
+                        values = (
+                            video['Video_Id'],
+                            video['Channel_Name'],
+                            video['Title'],
+                            ','.join(video['Tags']) if video['Tags'] else '',
+                            video['Description'],
+                            convert_to_mysql_datetime(video['Published_At']),
+                            video['View_Count'],
+                            video['Like_Count'],
+                            video['Dislike_Count'],
+                            video['Comment_Count']
+                        )
+                        cursor.execute(sql, values)
+                    conn.commit()
+                    st.success("Videos data saved to the database.")
+                except pymysql.MySQLError as e:
+                    conn.rollback()
+                    st.error(f"MySQL error occurred: {e}")
+
+            elif operation == "Fetch Comments" and st.session_state.comments_info:
+                # Save comments data to 'commentss' table
+                comment_details = st.session_state.comments_info
+                try:
+                    for comment in comment_details:
+                        save_comment_to_db(comment)
+                    st.success("Comments data saved to the database.")
+                except Exception as e:
+                    st.error(f"Error saving comments to database: {e}")
+
+            conn.close()
+
+if __name__ == "__main__":
+    main()
+
+
+
